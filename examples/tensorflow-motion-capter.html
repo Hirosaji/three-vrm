@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>three-vrm example</title>
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no"
+		/>
+		<style>
+			body {
+				margin: 0;
+			}
+			canvas {
+				display: block;
+			}
+			#motion {
+				position: absolute;
+				bottom: 0;
+				right: 0;
+				color: white;
+			}
+			#webacamCanvas { transform: rotateY(180deg); }
+		</style>
+	</head>
+
+	<body>
+		<div id="vrm"></div>
+		<div id="motion">
+			<div id="loading-indicator">PoseNet model is loading.</div>
+			<canvas id="webacamCanvas" width="480" height="320"></canvas>
+			<video id="video" width="480" height="320" style="display:none;" autoplay playsinline>Video stream not
+			available.</video>
+		</div>
+		<script src="https://unpkg.com/three@0.106.2/build/three.js"></script>
+		<script src="https://unpkg.com/three@0.106.2/examples/js/loaders/GLTFLoader.js"></script>
+		<script src="https://unpkg.com/three@0.106.2/examples/js/controls/OrbitControls.js"></script>
+		<script src="./three-vrm.js"></script>
+		<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+		<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/posenet"></script>
+		<script>
+			//===================================
+			// モーションキャプチャ処理
+			let poseStore = {};
+			const webacamCanvas = document.getElementById("webacamCanvas");
+			const webcamCtx = webacamCanvas.getContext("2d");
+			const video = document.getElementById('video');
+			// カメラ映像をCanvasに表示し、検出部位を表示
+			function detectAndDraw(net) {
+				webcamCtx.drawImage(video, 0, 0, 480, 320);
+
+				net.estimateSinglePose(video, {
+					flipHorizontal: false
+				})
+				.then(function(pose) {
+					drawKeypoints(pose);
+				});
+			}
+			// カメラ映像にPoseNetで検出した部位のポイントを描画
+			function drawKeypoints(pose) {
+				pose.keypoints.forEach(keypoint => {
+					if (keypoint.score > 0.4) {
+						// 考えやすいように見た目通りに座標変換
+						// 中心を原点として左右反転
+						// 左側に表示されている手が左手になる
+						poseStore[keypoint.part] = {
+							x: 480/2 - keypoint.position.x,
+							y: 320/2 - keypoint.position.y
+						};
+
+						webcamCtx.beginPath();
+						webcamCtx.fillStyle = "rgb(255, 255, 0)"; // 黄色
+						webcamCtx.arc(
+							keypoint.position.x,
+							keypoint.position.y,
+							5,
+							(10 * Math.PI) / 180,
+							(80 * Math.PI) / 180,
+							true
+						);
+						webcamCtx.fill();
+						webcamCtx.fillText(
+							keypoint.part,
+							keypoint.position.x,
+							keypoint.position.y + 10
+						);
+					}
+				});
+			}
+			// カメラ映像を取得
+			navigator.mediaDevices.getUserMedia({ audio: false, video: true })
+			.then(function (mediaStream) {
+				// videoタグのsrcObjectにセット
+				video.srcObject = mediaStream;
+				video.onloadedmetadata = function (e) {
+					video.play();
+				};
+				return posenet.load();
+			})
+			.then(function (net) {
+				var loadingIndicator = document.getElementById("loading-indicator");
+				loadingIndicator.style.display = 'none';
+				setInterval(function () { detectAndDraw(net); }, 100);
+			});
+			//===================================
+
+			// renderer
+			const renderer = new THREE.WebGLRenderer();
+			renderer.setSize( window.innerWidth, window.innerHeight );
+			renderer.setPixelRatio( window.devicePixelRatio );
+			document.getElementById('vrm').appendChild( renderer.domElement );
+
+			// camera
+			const camera = new THREE.PerspectiveCamera( 30.0, window.innerWidth / window.innerHeight, 0.1, 20.0 );
+			camera.position.set( 0.0, 1.0, 5.0 );
+
+			// camera controls
+			const controls = new THREE.OrbitControls( camera, renderer.domElement );
+			controls.screenSpacePanning = true;
+			controls.target.set( 0.0, 1.0, 0.0 );
+			controls.update();
+
+			// scene
+			const scene = new THREE.Scene();
+
+			// light
+			const light = new THREE.DirectionalLight( 0xffffff );
+			light.position.set( 1.0, 1.0, 1.0 ).normalize();
+			scene.add( light );
+
+			// gltf and vrm
+			let currentVrm = undefined;
+			const loader = new THREE.GLTFLoader();
+			loader.crossOrigin = 'anonymous';
+			loader.load(
+
+				'./models/three-vrm-girl.vrm',
+
+				( gltf ) => {
+
+					console.log(gltf)
+
+					THREE.VRM.from( gltf ).then( ( vrm ) => {
+
+						scene.add( vrm.scene );
+						currentVrm = vrm;
+
+						vrm.humanoid.getBoneNode( THREE.VRMSchema.HumanoidBoneName.Hips ).rotation.y = Math.PI;
+
+						console.log( vrm );
+
+					} );
+
+				},
+
+				( progress ) => console.log( 'Loading model...', 100.0 * ( progress.loaded / progress.total ), '%' ),
+
+				( error ) => console.error( error )
+
+			);
+
+			// helpers
+			const gridHelper = new THREE.GridHelper( 10, 10 );
+			scene.add( gridHelper );
+
+			const axesHelper = new THREE.AxesHelper( 5 );
+			scene.add( axesHelper );
+
+			// animate
+			const clock = new THREE.Clock();
+
+			let angleStore = {};
+
+			// X軸からの角度
+			// 反時計回りにプラス。
+			function getAngleFromX(pos2, pos1) {
+				return Math.atan2(pos2.y - pos1.y, pos2.x - pos1.x);
+			}
+
+			function animate() {
+
+				requestAnimationFrame( animate );
+
+				const deltaTime = clock.getDelta();
+
+				if ( currentVrm ) {
+
+					if (poseStore) {
+						if (poseStore.leftShoulder && poseStore.rightShoulder) {
+							// モデルの背骨のrotationはY軸から時計回りの角度
+							// ポーズの両肩をつないだ線分はX軸から反時計回りの角度
+							let angle = getAngleFromX(poseStore.rightShoulder, poseStore.leftShoulder);
+							if (angle !== null) {
+								angle = angle * -1; // 回転方向を逆に
+								angleStore.Spine = angle;
+								currentVrm.humanoid.getBoneNode( THREE.VRMSchema.HumanoidBoneName.Spine ).rotation.z = angle;
+							}
+						}
+						if (poseStore.leftEye && poseStore.rightEye) {
+							// モデルの首のrotationは背骨から時計回りの角度
+							// ポーズの両目をつないだ線分はX軸から反時計回りの角度
+							let angle = getAngleFromX(poseStore.rightEye, poseStore.leftEye);
+							if (angle !== null) {
+								angle = angle * -1; // Y軸から時計回りの角度に変換
+								angleStore.Neck = angle;
+								angle = angle - (angleStore.Spine || 0); // 背骨からの角度に変換
+								currentVrm.humanoid.getBoneNode( THREE.VRMSchema.HumanoidBoneName.Neck ).rotation.z = angle;
+							}
+						}
+						if (poseStore.leftShoulder && poseStore.leftElbow) {
+							// モデルの右手上腕のrotationは背骨-90°方向から時計回りの角度
+							// ポーズの左手上腕はX軸から反時計回りの角度
+							let angle = getAngleFromX(poseStore.leftElbow, poseStore.leftShoulder);
+							if (angle !== null) {
+								angle = Math.PI - angle; // -X軸から時計回りの角度に変換
+								angleStore.RightUpperArm = angle;
+								angle = angle - (angleStore.Spine || 0); // 背骨-90°方向のから角度に変換
+								currentVrm.humanoid.getBoneNode( THREE.VRMSchema.HumanoidBoneName.RightUpperArm ).rotation.z = angle;
+							}
+						}
+						if (poseStore.leftWrist && poseStore.leftElbow) {
+							// モデルの右手前腕のrotationは右手上腕から時計回りの角度
+							// ポーズの左手前腕はX軸から反時計回りの角度
+							let angle = getAngleFromX(poseStore.leftWrist, poseStore.leftElbow);
+							if (angle !== null) {
+								angle = Math.PI - angle; // -X軸から時計回りの角度に変換
+								angleStore.RightLowerArm = angle;
+								angle = angle - (angleStore.RightUpperArm || 0); // 右手上腕からの角度に変換
+								currentVrm.humanoid.getBoneNode( THREE.VRMSchema.HumanoidBoneName.RightLowerArm ).rotation.z = angle;
+							}
+						}
+						if (poseStore.rightShoulder && poseStore.rightElbow) {
+							// モデルの左手上腕のrotationは背骨+90°方向から時計回りの角度
+							// ポーズの右手上腕はX軸から反時計回りの角度
+							let angle = getAngleFromX(poseStore.rightElbow, poseStore.rightShoulder);
+							if (angle !== null) {
+								angle = angle * -1; // X軸から時計回りの角度に変換
+								angleStore.LeftUpperArm = angle;
+								angle = angle - (angleStore.Spine || 0); // 背骨+90°方向からの角度に変換
+								currentVrm.humanoid.getBoneNode( THREE.VRMSchema.HumanoidBoneName.LeftUpperArm ).rotation.z = angle;
+							}
+						}
+						if (poseStore.rightWrist && poseStore.rightElbow) {
+							// モデルの左手前腕のrotationは左手上腕から時計回りの角度
+							// ポーズの右手前腕はX軸から反時計回りの角度
+							let angle = getAngleFromX(poseStore.rightWrist, poseStore.rightElbow);
+							if (angle !== null) {
+								angle = angle * -1; // X軸から時計回りの角度に変換
+								angleStore.LeftLowerArm = angle;
+								angle = angle - (angleStore.LeftUpperArm || 0); // 左手上腕からの角度に変換
+								currentVrm.humanoid.getBoneNode( THREE.VRMSchema.HumanoidBoneName.LeftLowerArm ).rotation.z = angle;
+							}
+						}
+					}
+
+					// update vrm
+					currentVrm.update( deltaTime );
+
+				}
+
+				renderer.render( scene, camera );
+
+			}
+
+			animate();
+		</script>
+	</body>
+</html>
